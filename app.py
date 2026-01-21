@@ -1,110 +1,166 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import math
 
-# 設定網頁標題與佈局
-st.set_page_config(page_title="群創操盤儀表板", layout="centered")
+# --- 設定網頁與樣式 ---
+st.set_page_config(page_title="台股行動戰情室", layout="centered", page_icon="📈")
 
-# 標題
-st.title("📊 群創 (3481) 決策系統")
-st.caption("Auto-updated via Python & Yahoo Finance")
+# 自定義 CSS 讓手機版更好看 (隱藏多餘邊距)
+st.markdown("""
+    <style>
+    .stMetric {
+        background-color: #f0f2f6;
+        padding: 10px;
+        border-radius: 10px;
+    }
+    /* 讓漲停顯示紅色，跌停顯示綠色 (台股習慣) */
+    .limit-up { color: #ff4b4b; font-weight: bold; font-size: 1.2em; }
+    .limit-down { color: #09ab3b; font-weight: bold; font-size: 1.2em; }
+    </style>
+    """, unsafe_allow_html=True)
 
-# --- 1. 數據抓取區 ---
-@st.cache_data(ttl=60) # 設定快取 60 秒，避免頻繁請求
-def get_stock_data():
-    stock = yf.Ticker("3481.TW")
-    # 抓取近一個月資料以計算 9 日指標
-    df = stock.history(period="1mo")
-    return df
+# --- 核心邏輯函數 ---
+
+# 1. 台股升降單位 (Tick) 判斷
+def get_tick_size(price):
+    if price < 10: return 0.01
+    if price < 50: return 0.05
+    if price < 100: return 0.1
+    if price < 500: return 0.5
+    if price < 1000: return 1.0
+    return 5.0
+
+# 2. 計算漲跌停價 (嚴格遵守證交所無條件捨去/進位規則)
+def calculate_limits(prev_close):
+    tick = get_tick_size(prev_close) # 依據基準價決定 Tick (通常用昨收，但也需考慮跨區間，此處簡化以昨收為主)
+    
+    # 漲停：昨收 * 1.10 -> 無條件捨去至 Tick
+    raw_up = prev_close * 1.10
+    # 處理跨區間 Tick (例如 49.9 漲停變 54.8)
+    up_tick = get_tick_size(raw_up) 
+    limit_up = math.floor(raw_up / up_tick) * up_tick
+    
+    # 跌停：昨收 * 0.90 -> 無條件進位至 Tick
+    raw_down = prev_close * 0.90
+    down_tick = get_tick_size(raw_down)
+    limit_down = math.ceil(raw_down / down_tick) * down_tick
+    
+    return limit_up, limit_down
+
+# --- 側邊欄設定 ---
+with st.sidebar:
+    st.header("⚙️ 設定")
+    ticker_input = st.text_input("股票代號", value="3481.TW").upper()
+    nav_input = st.number_input("每股淨值 (NAV)", value=26.5, step=0.1, help="請查閱最新財報")
+    st.info("輸入代號後按 Enter 更新 (如 2330.TW)")
+
+# --- 主程式 ---
+st.title(f"📊 {ticker_input.replace('.TW', '')} 決策儀表板")
 
 try:
-    with st.spinner('正在抓取最新股價...'):
-        df = get_stock_data()
+    with st.spinner('連線 Yahoo Finance 抓取中...'):
+        # 抓取 3 個月資料 (為了算 MA60)
+        stock = yf.Ticker(ticker_input)
+        hist = stock.history(period="3mo")
         
-    # 取得最新一筆與前一筆資料
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
-    
-    current_price = latest['Close']
-    price_change = current_price - prev['Close']
-    
-    # 計算 9 日高低點 (RSV 用)
-    last_9_days = df.iloc[-9:]
-    high_9 = last_9_days['High'].max()
-    low_9 = last_9_days['Low'].min()
-    
+        if hist.empty:
+            st.error("找不到資料，請確認代號是否正確 (需加 .TW)")
+            st.stop()
+
+        # 取得關鍵數據
+        latest = hist.iloc[-1]   # 最新一筆 (可能是盤中)
+        prev = hist.iloc[-2]     # 昨日收盤 (計算漲跌停基準)
+        
+        current_price = latest['Close']
+        prev_close = prev['Close']
+        price_change = current_price - prev_close
+        
+        # 計算漲跌停
+        limit_up, limit_down = calculate_limits(prev_close)
+        
+        # 計算均線 (MA)
+        hist['MA5'] = hist['Close'].rolling(window=5).mean()
+        hist['MA20'] = hist['Close'].rolling(window=20).mean()
+        hist['MA60'] = hist['Close'].rolling(window=60).mean()
+        
+        ma5 = hist['MA5'].iloc[-1]
+        ma20 = hist['MA20'].iloc[-1]
+        ma60 = hist['MA60'].iloc[-1]
+
+        # 計算 9日 K 值 (RSV)
+        last_9 = hist.iloc[-9:]
+        high_9 = last_9['High'].max()
+        low_9 = last_9['Low'].min()
+        rsv = 50
+        if high_9 != low_9:
+            rsv = ((current_price - low_9) / (high_9 - low_9)) * 100
+
 except Exception as e:
-    st.error(f"資料抓取失敗: {e}")
+    st.error(f"發生錯誤: {e}")
     st.stop()
 
-# --- 2. 參數設定區 (側邊欄或上方) ---
-with st.expander("⚙️ 參數設定 (可手動微調)", expanded=True):
-    col1, col2 = st.columns(2)
-    # 淨值通常抓不到準的，建議手動設定或寫死
-    nav = col1.number_input("每股淨值 (NAV)", value=26.5, step=0.1)
-    # 股價允許微調 (以防 API 延遲)
-    live_price = col2.number_input("目前股價", value=float(current_price), step=0.05)
+# --- 1. 價格與漲跌停區 (最重要資訊放最上面) ---
+col1, col2 = st.columns([1.5, 1])
 
-# --- 3. 邏輯運算 ---
-# P/B Ratio
-pb = live_price / nav
-pb_score = 0
-if pb < 0.6: pb_score = 2
-elif pb > 0.85: pb_score = -2
-else: pb_score = 1 if pb < 0.75 else -1
+with col1:
+    # 顯示目前股價
+    st.metric("目前股價", f"{current_price:.2f}", f"{price_change:.2f}")
 
-# RSV (KD 的 K)
-rsv = 50
-if high_9 != low_9:
-    rsv = ((live_price - low_9) / (high_9 - low_9)) * 100
-rsv = max(0, min(100, rsv))
+with col2:
+    # 顯示漲跌停
+    st.markdown(f"🔥 漲停: <span class='limit-up'>{limit_up:.2f}</span>", unsafe_allow_html=True)
+    st.markdown(f"🌲 跌停: <span class='limit-down'>{limit_down:.2f}</span>", unsafe_allow_html=True)
+    st.caption(f"昨收: {prev_close}")
 
-# --- 4. 視覺化呈現 (手機友善介面) ---
+st.divider()
 
-# 顯示即時股價
-st.metric(label="群創 (3481)", value=f"{live_price}", delta=f"{price_change:.2f}")
+# --- 2. 技術指標快篩 (均線 & 狀態) ---
+st.subheader("📈 技術指標 (Trend)")
+c1, c2, c3 = st.columns(3)
 
-st.markdown("---")
+# 判斷站上或跌破
+def get_status(price, ma):
+    return "🔴 站上" if price > ma else "🟢 跌破"
 
-# 顯示決策燈號
+with c1:
+    st.metric("MA5 (週線)", f"{ma5:.2f}", delta=None)
+    st.caption(get_status(current_price, ma5))
+with c2:
+    st.metric("MA20 (月線)", f"{ma20:.2f}", delta=None)
+    st.caption(get_status(current_price, ma20))
+with c3:
+    st.metric("MA60 (季線)", f"{ma60:.2f}", delta=None)
+    st.caption(get_status(current_price, ma60))
+
+# --- 3. 經理人估值邏輯 (保留您之前的需求) ---
+st.divider()
+st.subheader("💼 經理人估值 (Valuation)")
+
+pb = current_price / nav_input
 col_a, col_b = st.columns(2)
 
 with col_a:
-    st.subheader("P/B 估值")
-    st.write(f"**{pb:.2f}x**")
+    st.write("#### 股價淨值比 P/B")
+    st.write(f"**{pb:.2f}倍**")
+    
     if pb < 0.6:
-        st.success("🟢 超跌 (Buy)")
+        st.error("★ 歷史超跌 (Buy)")
     elif pb > 0.85:
-        st.error("🔴 昂貴 (Sell)")
+        st.success("★ 壓力區 (Sell)")
     else:
-        st.warning("🟡 觀望 (Hold)")
+        st.warning("合理區間")
 
 with col_b:
-    st.subheader("9日動能")
-    st.write(f"位置: **{rsv:.1f}%**")
+    st.write("#### 短線動能 (RSV)")
+    st.write(f"**{rsv:.1f}%**")
+    
     if rsv < 20:
-        st.success("🟢 低檔鈍化")
+        st.error("低檔鈍化 (反彈機會)")
     elif rsv > 80:
-        st.error("🔴 高檔過熱")
+        st.success("高檔過熱 (拉回風險)")
     else:
-        st.warning("🟡 中性震盪")
+        st.warning("中性震盪")
 
-st.markdown("---")
-
-# 最終建議
-st.subheader("經理人評級")
-final_score = pb_score + (1 if rsv < 20 else (-1 if rsv > 80 else 0))
-
-if final_score >= 2:
-    st.balloons() # 噴氣球特效
-    st.error("## 🔥 強力買進 (STRONG BUY)") # Streamlit 的 error 是紅色，適合台股漲
-    st.write("估值便宜且位於技術低檔")
-elif final_score <= -2:
-    st.success("## 🌲 建議賣出 (SELL)") # 台股跌是綠色
-    st.write("估值過高或短線過熱")
-else:
-    st.info("## 👀 觀望 (WAIT)")
-
-# 顯示數據表格
-st.caption("近期 9 日數據：")
-st.dataframe(last_9_days[['Open', 'High', 'Low', 'Close']].sort_index(ascending=False))
+# --- 4. 歷史走勢圖 ---
+st.line_chart(hist[['Close', 'MA20']])
