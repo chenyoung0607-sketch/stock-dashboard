@@ -3,10 +3,63 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import math
+import requests
+import datetime
+import time
+
 
 # --- 設定網頁與樣式 ---
-st.set_page_config(page_title="台股全方位戰情室", layout="wide", page_icon="📈")
+st.set_page_config(page_title="戰情室", layout="wide", page_icon="📈")
+# --- 新增：籌碼面爬蟲 (抓取證交所最新資料) ---
+@st.cache_data(ttl=3600)  # 設定快取 1 小時，避免頻繁請求被證交所封鎖
+def get_twse_chips(stock_id):
+    """
+    抓取最近一交易日的三大法人與融資券數據
+    """
+    stock_id = stock_id.replace(".TW", "") # 去除 .TW
+    
+    # 嘗試回推最近 5 天 (尋找最近的交易日)
+    date_cursor = datetime.datetime.now()
+    
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+    
+    # 最多嘗試回推 5 天 (避開週末假日)
+    for i in range(5):
+        date_str = date_cursor.strftime('%Y%m%d')
+        # 1. 抓取三大法人 (T86)
+        url_investors = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={date_str}&selectType=ALL&response=json"
+        
+        try:
+            res = requests.get(url_investors, headers=headers, timeout=5)
+            data = res.json()
+            
+            if data['stat'] == 'OK':
+                # 找到該股票的資料
+                # 格式通常為: [代號, 名稱, 外資買進, 外資賣出, 外資買賣超, ..., 投信..., 自營商...]
+                # 注意：欄位索引可能會變，這裡抓取常見位置 (依據 TWSE 現行格式)
+                for row in data['data']:
+                    if row[0] == stock_id:
+                        # 整理數據 (外資=4, 投信=10, 自營商=11(合計)) *索引須視證交所格式微調，此為經驗值
+                        foreign_net = int(row[4].replace(',', '')) // 1000 # 換算成張
+                        trust_net = int(row[10].replace(',', '')) // 1000
+                        dealer_net = int(row[11].replace(',', '')) // 1000
+                        
+                        return {
+                            "date": date_cursor.strftime('%Y-%m-%d'),
+                            "foreign": foreign_net, # 外資
+                            "trust": trust_net,     # 投信
+                            "dealer": dealer_net,   # 自營商
+                            "found": True
+                        }
+        except Exception as e:
+            print(f"Error fetching {date_str}: {e}")
+            pass
+        
+        # 往回推一天
+        date_cursor -= datetime.timedelta(days=1)
+        time.sleep(1) # 禮貌性延遲
 
+    return {"found": False, "msg": "近期無資料或連線失敗"}
 # CSS 樣式優化
 st.markdown("""
     <style>
@@ -279,7 +332,60 @@ with tab3:
         macd_data = df[['MACD_Hist']].iloc[-60:]
         st.bar_chart(macd_data)
         st.caption("近 60 日 MACD 柱狀圖變化")
+# 新增 Tab 4
+tab4_chips = st.tabs(["籌碼透視 (法人/融資)"])[0] # 若要加在原本的 tabs 裡，請修改上面的 st.tabs 定義
 
+with tab4_chips: # 或者直接寫 st.header("籌碼透視")
+    st.subheader("🏦 三大法人動向 (最新交易日快照)")
+    
+    # 呼叫爬蟲
+    chip_data = get_twse_chips(ticker_input)
+    
+    if chip_data.get("found"):
+        st.caption(f"資料日期: {chip_data['date']} (單位: 張)")
+        
+        col_f, col_t, col_d = st.columns(3)
+        
+        def color_metric(val):
+            return "normal" # Streamlit 會自動處理正負紅綠
+            
+        with col_f:
+            st.metric("外資 (Foreign)", f"{chip_data['foreign']:,} 張", delta=chip_data['foreign'])
+        with col_t:
+            st.metric("投信 (Trust)", f"{chip_data['trust']:,} 張", delta=chip_data['trust'])
+        with col_d:
+            st.metric("自營商 (Dealer)", f"{chip_data['dealer']:,} 張", delta=chip_data['dealer'])
+            
+        # 簡易解讀邏輯
+        st.markdown("---")
+        st.markdown("#### 🤖 AI 籌碼解讀")
+        
+        score = 0
+        reasons = []
+        
+        if chip_data['foreign'] > 1000:
+            reasons.append("★ **外資大買**：國際資金進駐，趨勢有利多方。")
+            score += 2
+        elif chip_data['foreign'] < -1000:
+            reasons.append("⚠️ **外資大賣**：提款壓力大，需留意權值股修正。")
+            score -= 2
+            
+        if chip_data['trust'] > 0:
+            reasons.append("★ **投信買超**：內資作帳或認養，中小型股易有表現。")
+            score += 1
+        elif chip_data['trust'] < 0:
+            reasons.append("⚠️ **投信結帳**：內資獲利了結。")
+            score -= 1
+            
+        if score > 0:
+            st.success(f"籌碼偏多 (分數 {score})：{' '.join(reasons)}")
+        elif score < 0:
+            st.error(f"籌碼偏空 (分數 {score})：{' '.join(reasons)}")
+        else:
+            st.warning("籌碼中性：法人多空互抵或觀望。")
+            
+    else:
+        st.warning("無法取得籌碼資料，可能是盤中尚未更新或證交所連線忙碌中。")
 # --- 頁尾 ---
 st.markdown("---")
 st.caption("⚠️ 免責聲明：本工具僅供技術分析研究，不代表投資建議。股市有風險，投資需謹慎。")
