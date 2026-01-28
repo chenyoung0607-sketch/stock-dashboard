@@ -160,22 +160,74 @@ try:
         ma_cols[1].metric("MA20 (月)", f"{latest['MA20']:.2f}", f"乖離 {latest['Bias_20']:.2f}%")
         ma_cols[2].metric("MA60 (季)", f"{latest['MA60']:.2f}")
 
+
+    # --- 修改後的 Tab 1 內容 (🌊 估值位階) ---
     with tabs[1]:
-        st.subheader("法人評價參考 (FinMind 數據)")
+        st.subheader("💡 法人評價與診斷 (FinMind 數據)")
         fm_df, status = get_finmind_indicators(ticker_input)
+        
         if not fm_df.empty:
+            # 1. 數據診斷邏輯
+            current_per = fm_df['PER'].iloc[-1]
+            current_pbr = fm_df['PBR'].iloc[-1]
+            
+            # 計算分位數 (20% 為便宜區, 80% 為昂貴區)
+            per_p20 = fm_df['PER'].quantile(0.2)
+            per_p80 = fm_df['PER'].quantile(0.8)
+            pbr_p20 = fm_df['PBR'].quantile(0.2)
+            pbr_p80 = fm_df['PBR'].quantile(0.8)
+            
+            # 2. 顯示診斷卡片
+            diag_col1, diag_col2 = st.columns(2)
+            
+            with diag_col1:
+                if current_per < per_p20:
+                    st.success(f"✅ PER 診斷：估值偏低 ({current_per:.2f}x)")
+                elif current_per > per_p80:
+                    st.error(f"⚠️ PER 診斷：估值偏高 ({current_per:.2f}x)")
+                else:
+                    st.info(f"觀察中：PER 處於合理區間 ({current_per:.2f}x)")
+                    
+            with diag_col2:
+                if current_pbr < pbr_p20:
+                    st.success(f"✅ PBR 診斷：股價淨值比偏低 ({current_pbr:.2f})")
+                elif current_pbr > pbr_p80:
+                    st.error(f"⚠️ PBR 診斷：股價淨值比偏高 ({current_pbr:.2f})")
+                else:
+                    st.info(f"觀察中：PBR 處於合理區間 ({current_pbr:.2f})")
+
+            st.divider()
+
+            # 3. 圖表顯示
             fc1, fc2 = st.columns(2)
             with fc1:
-                st.write("#### 歷史本益比 (PER)")
+                st.write("#### 歷史本益比 (PER) 趨勢")
                 st.line_chart(fm_df['PER'])
-                st.write(f"當前 PER: **{fm_df['PER'].iloc[-1]:.2f}x**")
             with fc2:
-                st.write("#### 歷史股價淨值比 (PBR)")
+                st.write("#### 歷史股價淨值比 (PBR) 趨勢")
                 st.line_chart(fm_df['PBR'])
-                st.write(f"當前 PBR: **{fm_df['PBR'].iloc[-1]:.2f}x**")
+
+            # 4. 新增：解讀方式教學區 (數據派投資指南)
+            with st.expander("📚 如何解讀這張表？ (投資新手必讀)"):
+                st.markdown(f"""
+                ### 1. 本益比 (PER) - 買的是「成長」
+                * **解讀方式**：代表回本年限。目前數值為 **{current_per:.2f}** 倍。
+                * **診斷標準**：
+                    * **低於 {per_p20:.2f} (P20)**：歷史低位，若公司獲利沒衰退，這可能是「撿便宜」的機會。
+                    * **高於 {per_p80:.2f} (P80)**：歷史高位，代表市場熱度極高，需慎防回檔。
+                
+                ### 2. 股價淨值比 (PBR) - 買的是「價值」
+                * **解讀方式**：股價相對於公司資產的倍數。目前數值為 **{current_pbr:.2f}**。
+                * **診斷標準**：
+                    * 對於景氣循環股（如航運、面板），PBR 比 PER 更具參考價值。
+                    * **低於 1**：代表股價比公司清算價值還低，通常具有極強支撐力。
+                    
+                ### 3. 交叉驗證邏輯
+                * **最佳買點**：股價在均線底部的「支撐區」+ PER 處於「歷史低位 (P20)」。
+                * **避開陷阱**：股價噴發 + PER 衝破 P80。除非公司 EPS 發生爆發性成長，否則不建議追高。
+                """)
         else:
             st.warning(f"無法載入估值資料：{status}")
-            st.info("請檢查 `.streamlit/secrets.toml` 是否正確配置 FINMIND_TOKEN")
 
     with tabs[2]:
         tc1, tc2 = st.columns(2)
